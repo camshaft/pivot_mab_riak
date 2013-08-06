@@ -1,0 +1,11 @@
+{application, pivot_mab_riak, [
+  {id, "pivot_mab_riak"},
+  {description, "Riak backend for pivot multi-armed bandit tests"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {applications, [
+    kernel,
+    stdlib
+  ]},
+  {env, []}
+]}.
