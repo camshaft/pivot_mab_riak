@@ -2,10 +2,10 @@
 
 %% -behaviour(pivot_mab_db).
 
--export([register/3]).
--export([list/0]).
--export([report/1]).
--export([update/2]).
+-export([register/4]).
+-export([list/1]).
+-export([report/2]).
+-export([update/3]).
 
 %% gen_server.
 
@@ -17,9 +17,9 @@
 -export([terminate/2]).
 -export([code_change/3]).
 
--define(BANDIT_BUCKET, <<"pivot:bandits">>).
--define(ARMS_BUCKET(Bandit), <<"pivot:arms:", Bandit/binary>>).
--define(STATE_BUCKET(Bandit), <<"pivot:state:", Bandit/binary>>).
+-define(BANDIT_BUCKET(App), <<"pivot:bandits:", App/binary>>).
+-define(ARMS_BUCKET(App, Bandit), <<"pivot:arms:", App/binary, ":", Bandit/binary>>).
+-define(STATE_BUCKET(App, Bandit), <<"pivot:state:", App/binary, ":", Bandit/binary>>).
 -define(SCORE_RESOLUTION, 1000).
 
 -record (state, {
@@ -27,31 +27,31 @@
   hosts
 }).
 
-register(Name, Arms, BanditEnabled) ->
+register(App, Bandit, Arms, BanditEnabled) ->
   % Init the bucket to allow multi
-  ok = gen_server:call(?MODULE, {init, ?STATE_BUCKET(Name)}),
+  ok = gen_server:call(?MODULE, {init, ?STATE_BUCKET(App, Bandit)}),
 
   % Create an empty key in our buckets list
   % TODO once riak supports crdt sets we will use that instead
-  ok = put(?BANDIT_BUCKET, Name, boolean_to_binary(BanditEnabled)),
+  ok = put(?BANDIT_BUCKET(App), Bandit, boolean_to_binary(BanditEnabled)),
 
   % Store the arms
   % TODO once riak supports crdt sets we will use that instead
-  ArmsBucket = ?ARMS_BUCKET(Name),
-  % register/3 doesn't get called that much so we won't batch it
+  ArmsBucket = ?ARMS_BUCKET(App, Bandit),
+  % register/4 doesn't get called that much so we won't batch it
   Results = [put(ArmsBucket, Arm, boolean_to_binary(Enabled)) || {Arm, Enabled} <- Arms],
   check_results(Results).
 
-list() ->
+list(App) ->
   % TODO once riak supports crdt sets we will use that instead
-  list_keys(?BANDIT_BUCKET).
+  list_keys(?BANDIT_BUCKET(App)).
 
-report(Bandit) ->
+report(App, Bandit) ->
   % TODO once riak supports crdt sets we will use that instead
   % TODO get the arm values so we can tell if the arms are enabled
-  case list_keys(?ARMS_BUCKET(Bandit)) of
+  case list_keys(?ARMS_BUCKET(App, Bandit)) of
     {ok, Arms} ->
-      Batch = fetch(?STATE_BUCKET(Bandit), batch:create(), Arms),
+      Batch = fetch(?STATE_BUCKET(App, Bandit), batch:create(), Arms),
       Presenter = presenterl:create(),
       batch:exec(Batch, [Presenter]),
       do_report(presenterl:encode(Presenter), Arms, []);
@@ -95,8 +95,8 @@ fetch(Bucket, Batch, [Arm|Arms]) ->
 
   fetch(Bucket, Batch, Arms).
 
-update(Bandit, Patches) ->
-  Batch = patch(?STATE_BUCKET(Bandit), batch:create(), Patches),
+update(App, Bandit, Patches) ->
+  Batch = patch(?STATE_BUCKET(App, Bandit), batch:create(), Patches),
 
   Presenter = presenterl:create(),
   batch:exec(Batch, [Presenter]),
