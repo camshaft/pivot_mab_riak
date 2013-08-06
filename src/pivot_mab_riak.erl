@@ -2,9 +2,8 @@
 
 %% -behaviour(pivot_mab_db).
 
--export([register/4]).
--export([list/1]).
--export([report/2]).
+-export([init/2]).
+-export([report/3]).
 -export([update/3]).
 
 %% gen_server.
@@ -17,8 +16,6 @@
 -export([terminate/2]).
 -export([code_change/3]).
 
--define(BANDIT_BUCKET(App), <<"pivot:bandits:", App/binary>>).
--define(ARMS_BUCKET(App, Bandit), <<"pivot:arms:", App/binary, ":", Bandit/binary>>).
 -define(STATE_BUCKET(App, Bandit), <<"pivot:state:", App/binary, ":", Bandit/binary>>).
 -define(SCORE_RESOLUTION, 1000).
 
@@ -27,44 +24,15 @@
   hosts
 }).
 
-register(App, Bandit, Arms, BanditEnabled) ->
+init(App, Bandit) ->
   % Init the bucket to allow multi
-  ok = gen_server:call(?MODULE, {init, ?STATE_BUCKET(App, Bandit)}),
+  gen_server:call(?MODULE, {init, ?STATE_BUCKET(App, Bandit)}).
 
-  % Create an empty key in our buckets list
-  % TODO once riak supports crdt sets we will use that instead
-  ok = put(?BANDIT_BUCKET(App), Bandit, boolean_to_binary(BanditEnabled)),
-
-  % Store the arms
-  % TODO once riak supports crdt sets we will use that instead
-  ArmsBucket = ?ARMS_BUCKET(App, Bandit),
-  % register/4 doesn't get called that much so we won't batch it
-  Results = [put(ArmsBucket, Arm, boolean_to_binary(Enabled)) || {Arm, Enabled} <- Arms],
-  check_results(Results).
-
-list(App) ->
-  % TODO once riak supports crdt sets we will use that instead
-  list_keys(?BANDIT_BUCKET(App)).
-
-report(App, Bandit) ->
-  % TODO once riak supports crdt sets we will use that instead
-  % TODO get the arm values so we can tell if the arms are enabled
-  case list_keys(?ARMS_BUCKET(App, Bandit)) of
-    {ok, Arms} ->
-      Batch = fetch(?STATE_BUCKET(App, Bandit), batch:create(), Arms),
-      Presenter = presenterl:create(),
-      batch:exec(Batch, [Presenter]),
-      do_report(presenterl:encode(Presenter), Arms, []);
-    Error ->
-      Error
-  end.
-
-do_report(_, [], Acc) ->
-  Acc;
-do_report(Results, [Arm|Arms], Acc) ->
-  ArmResults = proplists:get_all_values(Arm, Results),
-  State = {Arm, {fast_key:get(count, ArmResults), fast_key:get(score, ArmResults)}},
-  do_report(Results, Arms, [State|Acc]).
+report(App, Bandit, Arms) ->
+  Batch = fetch(?STATE_BUCKET(App, Bandit), batch:create(), Arms),
+  Presenter = presenterl:create(),
+  batch:exec(Batch, [Presenter]),
+  do_report(presenterl:encode(Presenter), Arms, []).
 
 fetch(_, Batch, []) ->
   Batch;
@@ -95,28 +63,34 @@ fetch(Bucket, Batch, [Arm|Arms]) ->
 
   fetch(Bucket, Batch, Arms).
 
-update(App, Bandit, Patches) ->
-  Batch = patch(?STATE_BUCKET(App, Bandit), batch:create(), Patches),
+do_report(_, [], Acc) ->
+  Acc;
+do_report(Results, [Arm|Arms], Acc) ->
+  ArmResults = proplists:get_all_values(Arm, Results),
+  State = {Arm, {fast_key:get(count, ArmResults), fast_key:get(score, ArmResults)}},
+  do_report(Results, Arms, [State|Acc]).
+
+update(App, Reward, Assignments) ->
+  Batch = update(App, batch:create(), Reward, Assignments),
 
   Presenter = presenterl:create(),
   batch:exec(Batch, [Presenter]),
   Results = presenterl:encode(Presenter),
   check_results(Results).
 
-patch(_, Batch, []) ->
+update(_, Batch, _, []) ->
   Batch;
-patch(Bucket, Batch, [{Arm, ScoreIncr}|Patches]) ->
-  patch(Bucket, Batch, [{Arm, 1, ScoreIncr}|Patches]);
-patch(Bucket, Batch, [{Arm, CountIncr, ScoreIncr}|Patches]) ->
+update(App, Batch, Reward, [{Bandit, Arm}|Assignments]) ->
+  Bucket = ?STATE_BUCKET(App, Bandit),
   batch:push(fun(P) ->
-    P ! [counter_incr(Bucket, <<Arm/binary,":count">>, CountIncr)]
+    P ! [counter_incr(Bucket, <<Arm/binary,":count">>, 1)]
   end, Batch),
 
   batch:push(fun(P) ->
-    P ! [counter_incr(Bucket, <<Arm/binary,":score">>, trunc(ScoreIncr * ?SCORE_RESOLUTION))]
+    P ! [counter_incr(Bucket, <<Arm/binary,":score">>, trunc(Reward * ?SCORE_RESOLUTION))]
   end, Batch),
 
-  patch(Bucket, Batch, Patches).
+  update(App, Batch, Reward, Assignments).
 
 check_results([]) ->
   ok;
@@ -125,18 +99,7 @@ check_results([ok|Results]) ->
 check_results([Error|_]) ->
   Error.
 
-boolean_to_binary(true) ->
-  <<1>>;
-boolean_to_binary(_) ->
-  <<0>>.
-
 % TODO replace with a connection pooler
-
-put(Bucket, Key, Value) ->
-  gen_server:call(?MODULE, {put, riakc_obj:new(Bucket, Key, Value)}).
-
-list_keys(Bucket) ->
-  gen_server:call(?MODULE, {list_keys, Bucket}).
 
 counter_val(Bucket, Key) ->
   gen_server:call(?MODULE, {counter_val, Bucket, Key}).
